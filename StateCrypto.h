@@ -1,0 +1,7 @@
+#pragma once
+#include "iiSocietyClientExport.h"
+#include <QByteArray>
+// AccountManager permits a 192 KiB snapshot; retain room for paired devices.
+inline constexpr qsizetype MaximumSocietyStateBytes = 256 * 1024;
+IISOCIETYCLIENT_EXPORT QByteArray sealSocietyState(const QByteArray &plain, const QByteArray &key, const QByteArray &context);
+IISOCIETYCLIENT_EXPORT QByteArray openSocietyState(const QByteArray &sealed, const QByteArray &key, const QByteArray &context);

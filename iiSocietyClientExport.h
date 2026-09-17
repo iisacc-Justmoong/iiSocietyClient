@@ -1,0 +1,9 @@
+#pragma once
+#include <QtCore/qglobal.h>
+#if defined(IISOCIETYCLIENT_STATIC)
+#define IISOCIETYCLIENT_EXPORT
+#elif defined(IISOCIETYCLIENT_BUILDING_LIBRARY)
+#define IISOCIETYCLIENT_EXPORT Q_DECL_EXPORT
+#else
+#define IISOCIETYCLIENT_EXPORT Q_DECL_IMPORT
+#endif
