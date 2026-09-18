@@ -2,6 +2,7 @@
 #include "iiSocietyClientExport.h"
 #include <QObject>
 #include <QHostAddress>
+#include <QJsonObject>
 #include <memory>
 class AccountSession;
 class DiscoveryService;
@@ -20,10 +21,14 @@ public:
     void synchronizeNow();
     QString status() const;
     bool connected() const;
+    // Uses only the authenticated host bound to this replica. No caller URL,
+    // credential or peer selection is accepted.
+    QString requestHost(const QJsonObject &payload);
 signals:
     void changed();
     void synchronized();
     void progress(QString path, qint64 completed, qint64 total);
+    void hostResponse(QString requestId, QJsonObject response);
 private:
     class Private;
     std::unique_ptr<Private> d;

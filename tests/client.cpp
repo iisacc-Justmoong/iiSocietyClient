@@ -51,10 +51,15 @@ private slots:
         iiSocietySync::Controller hosting({}); hosting.open(hostRoot.path(), scope); QTRY_VERIFY(hosting.available());
         hosting.setPeers({phoneId}, {});
         iiServerHost::Peer host;
+        const auto handle = [&](const QString &peer, const QJsonObject &payload) {
+            if (payload.value("op") == "society.generation")
+                return QJsonObject{{"ok", true}, {"peer", peer}, {"echo", payload}};
+            return hosting.handle(peer, payload);
+        };
         iiServerHost::PeerOptions options; options.relayUrl = endpoint; options.credential = "fixture";
         options.peerId = hostId; options.name = "Society host"; options.service = "com.iisacc.society.files"; options.localEnabled = false;
         if (useRelay) {
-            QVERIFY(host.start(options, [&](auto peer, auto payload) { return hosting.handle(peer, payload); })); QTRY_VERIFY(host.isReady());
+            QVERIFY(host.start(options, handle)); QTRY_VERIFY(host.isReady());
         }
         FakeDiscoveryService discovery, hostDiscovery;
         NearbyDevices hostNearby(&hostDiscovery, QHostAddress::LocalHost);
@@ -63,7 +68,7 @@ private slots:
         AutomaticPairing hostPairing(&hostNearby, &hostLan, [&] {
             return hostLan.hosting() || hostLan.startHost(hostId, "Society host", [&](auto peer, auto payload) {
                 if (payload.value("op") == "list") return QJsonObject{{"ok", true}, {"entries", QJsonArray()}};
-                return hosting.handle(peer, payload);
+                return handle(peer, payload);
             }, {"127.0.0.1"}, QHostAddress::LocalHost);
         }, [](auto) { return false; }, [&] { hostLan.stop(); });
         QTimer announcements;
@@ -79,9 +84,16 @@ private slots:
             announcements.start(50);
         }
         iiSocietyClient::Client consumer(&account, &discovery, QHostAddress::LocalHost);
+        QVERIFY(consumer.requestHost({{"op", "society.generation"}}).isEmpty());
         QVERIFY(consumer.start(phoneRoot.path())); QTRY_VERIFY2_WITH_TIMEOUT(consumer.connected(),
             qPrintable(consumer.status() + ' ' + hostPairing.status() + ' ' + hostLan.phase() + ' ' + hostLan.errorString()), 10000);
         iiSocietyContainer::StorageMap map(*iiSocietyContainer::SocietyDrive::open(phoneRoot.path()));
+        QSignalSpy responses(&consumer, &iiSocietyClient::Client::hostResponse);
+        const auto rpc = consumer.requestHost({{"op", "society.generation"}, {"action", "submit"}});
+        QVERIFY(!rpc.isEmpty()); QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(responses[0][0].toString(), rpc);
+        QCOMPARE(responses[0][1].toJsonObject().value("peer").toString(), phoneId);
+        QVERIFY(!QFileInfo::exists(phoneRoot.filePath("Models/model.safetensors")));
         const auto request = map.request({"models/model.safetensors"}); QVERIFY(!request.isEmpty()); consumer.synchronizeNow();
         QTRY_COMPARE_WITH_TIMEOUT(map.requestState(request).value("state").toString(), QString("ready"), 15000);
         QVERIFY(map.available({"models/model.safetensors"}));
@@ -89,6 +101,7 @@ private slots:
         consumer.synchronizeNow();
         QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(hostRoot.filePath("Generation History/generated.png")), 15000);
         QVERIFY(account.logout()); QTRY_VERIFY(!account.signedIn()); QTRY_VERIFY(!consumer.connected());
+        QVERIFY(consumer.requestHost({{"op", "society.generation"}}).isEmpty());
         consumer.stop(); hosting.closeAndWait(); host.stop(); relay.stop();
     }
 };

@@ -9,6 +9,7 @@
 #include <QSysInfo>
 #include <QTimer>
 #include <QScopedValueRollback>
+#include <QSet>
 
 namespace iiSocietyClient {
 class Client::Private {
@@ -28,6 +29,7 @@ public:
     QJsonObject binding;
     QUrl server;
     QByteArray credential;
+    QSet<QString> hostRequests;
     bool active = false, updating = false, online = false;
     explicit Private(Client *owner, AccountSession *session, DiscoveryService *service, QHostAddress bind)
         : q(owner), account(session), discovery(service), bindAddress(bind), sync([this](auto peer, auto payload) {
@@ -41,7 +43,10 @@ public:
             if (!sync.errorString().isEmpty()) message = sync.errorString();
             emit q->changed();
         });
-        const auto response = [this](const QString &id, const QJsonObject &result, const QString &) { sync.receive(id, result); };
+        const auto response = [this](const QString &id, const QJsonObject &result, const QString &) {
+            if (hostRequests.remove(id)) emit q->hostResponse(id, result);
+            else sync.receive(id, result);
+        };
         QObject::connect(&lan, &iiServerHost::LanPeer::completed, q, response);
         QObject::connect(&relay, &iiServerHost::Peer::completed, q, response);
         QObject::connect(&lan, &iiServerHost::LanPeer::paired, q, [this](const QString &host) {
@@ -67,6 +72,7 @@ public:
     }
     void transportStop() {
         online = false;
+        hostRequests.clear();
         sync.closeAndWait();
         if (nearby) nearby->clear();
         lan.stop(); relay.stop(); server = QUrl(); credential.clear();
@@ -146,4 +152,14 @@ void Client::stop() { d->active = false; d->timer.stop(); d->transportStop(); }
 void Client::synchronizeNow() { d->update(); d->sync.synchronizeNow(); }
 QString Client::status() const { return d->message; }
 bool Client::connected() const { return d->active && d->online; }
+QString Client::requestHost(const QJsonObject &payload) {
+    if (!connected() || d->hostRequests.size() >= 64 || payload.value("op") != "society.generation") return {};
+    const auto host = d->binding.value("host").toString();
+    const auto id = d->server.isEmpty() ? d->lan.request(host, payload) : d->relay.request(host, payload);
+    if (!id.isEmpty()) {
+        d->hostRequests.insert(id);
+        QTimer::singleShot(30000, this, [this, id] { d->hostRequests.remove(id); });
+    }
+    return id;
+}
 }
