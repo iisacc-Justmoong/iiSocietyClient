@@ -2,7 +2,9 @@
 #include "PairingCredentialsFixture.h"
 #include <QCryptographicHash>
 #include <QFile>
+#include <QUuid>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QTcpServer>
 #include <QTcpSocket>
 
@@ -32,7 +34,12 @@ public:
                         if (line.toLower().startsWith("content-length:")) length = line.mid(15).trimmed().toInt();
                     if (bytes.size() < offset + 4 + length) return;
                     socket->setProperty("handled", true);
-                    const auto input = QJsonDocument::fromJson(bytes.mid(offset + 4, length)).object();
+                    const auto wire = QJsonDocument::fromJson(bytes.mid(offset + 4, length)).object();
+                    if (!bytes.startsWith("POST /Account/GraphQL ") || !wire.value("query").toString().contains("appSession(input: $input)")) {
+                        socket->write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        socket->disconnectFromHost(); return;
+                    }
+                    const auto input = wire.value("variables").toObject().value("input").toObject();
                     requests.append(input); headers.append(bytes.left(offset));
                     if (hang) return;
                     const auto intent = input.value("intent").toString();
@@ -47,6 +54,18 @@ public:
                         cookies = "Set-Cookie: iisacc_auth_id=fixture-id; Path=/; HttpOnly\r\n"
                                   "Set-Cookie: iisacc_auth_refresh=fixture-refresh; Path=/; HttpOnly; Max-Age=3600\r\n"
                                   "Set-Cookie: iisacc_login_session=fixture-session; Path=/; HttpOnly; Max-Age=3600\r\n";
+                        if (intent == "container") {
+                            if (input.contains("containerDrive")) {
+                                auto location = input.value("containerDrive").toObject();
+                                location.remove("expectedRevision");
+                                location.insert("hostDeviceId", input.value("device").toObject().value("id"));
+                                location.insert("revision", QUuid::createUuid().toString(QUuid::WithoutBraces));
+                                profile.insert("societyContainerDrive", location);
+                            }
+                            payload = {{"societyContainerDrive", profile.value("societyContainerDrive").isUndefined()
+                                ? QJsonValue(QJsonValue::Null) : profile.value("societyContainerDrive")}};
+                            cookies.clear();
+                        }
                         if (intent == "pairing") {
                             auto proof = pairingVersion == 2 ? localPairingCredentialsFixture(scope())
                                 : pairingCredentialsFixture(scope());
@@ -57,8 +76,10 @@ public:
                             payload = {{"pairing", proof}}; cookies.clear();
                         }
                     }
-                    const auto body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-                    socket->write("HTTP/1.1 " + QByteArray::number(status) + " Response\r\nContent-Type: application/json\r\n"
+                    const auto envelope = status == 200 ? QJsonObject{{"data", QJsonObject{{"appSession", payload}}}}
+                        : QJsonObject{{"errors", QJsonArray{QJsonObject{{"message", "Rejected"}, {"extensions", QJsonObject{{"status", status}, {"result", payload}}}}}}};
+                    const auto body = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
+                    socket->write("HTTP/1.1 " + QByteArray::number(200) + " Response\r\nContent-Type: application/json\r\n"
                         "Connection: close\r\n" + cookies + "Content-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body);
                     socket->disconnectFromHost();
                 });

@@ -1,4 +1,5 @@
 #include <iiSocietyClient/Client.h>
+#include <iiSocietyClient/PairingCredentials.h>
 #include <iiSocietyClient/AccountSession.h>
 #include <iiSocietyClient/NearbyDevices.h>
 #include <iiSocietyClient/AutomaticPairing.h>
@@ -15,6 +16,41 @@
 class ClientTests : public QObject {
     Q_OBJECT
 private slots:
+    void accountProofRejectsTamperingExpiryAndCrossAccount() {
+        AccountServer authority; QVERIFY(authority.server.listen(QHostAddress::LocalHost));
+        MemorySessionStore state; AccountSession account(authority.url(), &state, nullptr);
+        QVERIFY(account.login("builder@example.com", "FixtureOnly1!")); QTRY_VERIFY(account.signedIn());
+        QTRY_VERIFY(!account.busy()); account.requestPairingCredentials(); QTRY_VERIFY(!account.pairingCredentials().isEmpty());
+        const auto credentials = account.pairingCredentials(); const QByteArray context("client\nunique-offer-and-nonce");
+        const auto proof = SocietyPairingCredentials::sign(credentials, context); QVERIFY(!proof.isEmpty());
+        QVERIFY(SocietyPairingCredentials::verify(credentials, context, proof));
+        QVERIFY(!SocietyPairingCredentials::verify(credentials, "host\nunique-offer-and-nonce", proof));
+        QVERIFY(!SocietyPairingCredentials::verify(credentials, context + "other-offer", proof));
+        auto other = credentials; other.insert("scope", QString(64, 'f'));
+        QVERIFY(!SocietyPairingCredentials::verify(other, context, proof));
+        auto expired = credentials; expired.insert("expiresAt", QDateTime::currentDateTimeUtc().addSecs(-1).toString(Qt::ISODate));
+        QVERIFY(SocietyPairingCredentials::sign(expired, context).isEmpty());
+        QVERIFY(!SocietyPairingCredentials::verify(expired, context, proof));
+        QVERIFY(!SocietyPairingCredentials::verify(credentials, context, {}));
+    }
+    void accountSessionAutomaticallyFetchesItsDriveLocation() {
+        AccountServer authority; QVERIFY(authority.server.listen(QHostAddress::LocalHost));
+        MemorySessionStore state; AccountSession account(authority.url(), &state, nullptr);
+        QSignalSpy synced(account.manager(), &iisacc::accounts::AccountManager::containerDriveSynchronized);
+        QVERIFY(account.login("builder@example.com", "FixtureOnly1!"));
+        QTRY_VERIFY(account.signedIn()); QTRY_VERIFY(!synced.isEmpty());
+        QVERIFY(account.manager()->account()->societyContainerDrive().isEmpty());
+        const QJsonObject location{{"containerId", "b413adf3-0642-4565-941f-aa1940d25c51"},
+            {"imagePath", "/Volumes/Moved/Society.sparsebundle"}, {"hostDeviceId", QString(64, 'a')},
+            {"revision", "1d02e288-9704-4c5a-979e-f9b60d1799ca"}};
+        authority.profile.insert("societyContainerDrive", location);
+        bool refreshed = false;
+        QTRY_VERIFY(refreshed || (refreshed = account.manager()->refreshContainerDrive()));
+        QTRY_COMPARE(account.manager()->account()->societyContainerDrive(), location.toVariantMap());
+        QVERIFY(account.logout()); QTRY_VERIFY(!account.signedIn());
+        QVERIFY(account.manager()->account()->societyContainerDrive().isEmpty());
+    }
+
     void downloadsAndUploadsWithoutASocietyApplicationProcess_data() {
         QTest::addColumn<bool>("useRelay");
         QTest::newRow("saved-server") << true;
@@ -32,6 +68,12 @@ private slots:
         QVERIFY(iiSocietyContainer::SocietyDrive::create(hostRoot.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(phoneRoot.path()));
         QFile model(hostRoot.filePath("Models/model.safetensors")); QVERIFY(model.open(QIODevice::WriteOnly)); model.write(QByteArray(800123, 'm')); model.close();
         const auto hostId = QString(64, '1'); const auto phoneId = device.value("id").toString(); const auto scope = authority.scope();
+        authority.profile.insert("societyContainerDrive", QJsonObject{{"hostDeviceId", hostId},
+            {"containerId", iiSocietyContainer::SocietyDrive::open(hostRoot.path())->identifier()},
+            {"revision", "1d02e288-9704-4c5a-979e-f9b60d1799ca"}, {"imagePath", "/Volumes/Society.sparsebundle"}});
+        bool refreshed = false;
+        QTRY_VERIFY(refreshed || (refreshed = account.manager()->refreshContainerDrive()));
+        QTRY_COMPARE(account.manager()->account()->societyContainerDrive().value("hostDeviceId").toString(), hostId);
         // Fixture for the one-time Society setup: bind to the authenticated
         // host and receive its storage map, without downloading its payload.
         {
@@ -64,6 +106,8 @@ private slots:
         FakeDiscoveryService discovery, hostDiscovery;
         NearbyDevices hostNearby(&hostDiscovery, QHostAddress::LocalHost);
         iiServerHost::LanPeer hostLan;
+        hostLan.setPairingAuthentication([&](const QByteArray &context) { return SocietyPairingCredentials::sign(account.pairingCredentials(), context); },
+            [&](const QByteArray &context, const QJsonObject &proof) { return SocietyPairingCredentials::verify(account.pairingCredentials(), context, proof); });
         connect(&hostLan, &iiServerHost::LanPeer::completed, &hosting, [&](auto id, auto response, auto) { hosting.receive(id, response); });
         AutomaticPairing hostPairing(&hostNearby, &hostLan, [&] {
             return hostLan.hosting() || hostLan.startHost(hostId, "Society host", [&](auto peer, auto payload) {

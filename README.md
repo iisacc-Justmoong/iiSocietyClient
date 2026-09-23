@@ -22,3 +22,35 @@ SDK 루트의 설치기는 이 디렉터리의 CMake 프로젝트와 의존성�
 ## Source layout
 
 Implementation files and their headers live together under `src/`. Existing feature and platform subdirectories retain their responsibilities. Build configuration, tests, documentation, resources, and maintenance scripts remain at the project root. Configure and build using the repository-local `build/` directory.
+
+`AccountSession` also enables the account SDK's private Society drive-location synchronization:
+after sign-in and every 30 seconds, the current account receives `societyContainerDrive` (disk ID,
+host device ID, image path and revision). Other devices retain their local replica/mount paths.
+A location refresh does not request pairing keys or emit account changes when the value is unchanged.
+The account API and SDK contract are documented in `iiAcountManager/docs/ACCOUNT_CONTRACT.md`.
+
+## 계정 GraphQL 호환성
+
+iiAcountManager 0.2.8 이상이 필요하다. 로그인과 컨테이너 위치 동기화는 해당 SDK의
+`POST /Account/GraphQL` `appSession` mutation을 사용한다. 페어링도 같은 endpoint에
+`variables.input = {intent: "pairing", device: ...}`를 보낸다. `data.appSession.pairing`을
+검증한 뒤에만 저장하며, HTTP 200 GraphQL 오류의 세션 만료도 AccountManager에 전달한다.
+쿠키 범위·계정/기기 결합·키 검증·보안 저장소 계약은 유지한다. 운영 GraphQL 서버 배포가
+새 클라이언트 배포보다 먼저 이루어져야 하며 REST 재시도는 없다.
+
+## macOS 개발 빌드의 로그인 저장소
+
+실행 중인 프로세스의 Security framework 서명 정보를 확인한다. 개발자 팀이 없는
+비샌드박스 실행 파일(임시 서명 포함)은 사용자 Application Support 아래
+`iisacc/Development Groups/<SocietyAppGroup>/Library/Application Support/SocietyState`를
+사용한다. 앱 이름이 달라도 같은 그룹의 GUI와 daemon은 같은 위치를 사용한다.
+개발용 Keychain 서비스도 `.development.encrypted-state`로 분리한다. 기존 AES-256-GCM,
+0700/0600 권한, 철회 세대와 암호문 검증은 그대로 적용한다.
+
+팀 서명 또는 sandbox가 있는 앱은 계속 OS App Group API를 사용한다. 서명 조회 실패나
+보호 그룹 접근 거부를 개발 경로로 우회하지 않는다. iOS의 App Group 및 Data Protection도
+유지한다. 정식 서명과 개발 서명 간 로그인 정보를 자동 복사하지 않는다.
+`iiSocietyClient.AppleState`는 실제 임시 서명 프로세스에서 경로 선택과 앱/daemon 일치를
+검증한다. 암호화 저장·삭제·재실행 검사는 Society.GroupState에서 수행한다.
+
+LAN clients require server-issued account pairing proofs. Both LAN and relay select the host and container in the authenticated account `societyContainerDrive`; missing registration or another host grants no synchronization. The registered replacement host adopts a fresh mirror while retaining previous files in recovery.

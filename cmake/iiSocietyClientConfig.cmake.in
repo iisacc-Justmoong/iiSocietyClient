@@ -1,7 +1,7 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
 find_dependency(iiSocietySync 0.8.0 CONFIG)
-find_dependency(iiAcountManager 0.2.0 CONFIG)
+find_dependency(iiAcountManager 0.2.8 CONFIG)
 if(NOT IOS AND NOT ANDROID)
     find_dependency(OpenSSL 3 COMPONENTS Crypto)
 endif()

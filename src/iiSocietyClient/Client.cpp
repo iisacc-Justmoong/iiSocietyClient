@@ -1,5 +1,6 @@
 #include "Client.h"
 #include "AccountSession.h"
+#include "PairingCredentials.h"
 #include "NearbyDevices.h"
 #include "AutomaticPairing.h"
 #include <iiSocietySync.h>
@@ -25,7 +26,7 @@ public:
     iiSocietySync::Controller sync;
     QTimer timer;
     std::unique_ptr<QLockFile> lease;
-    QString container, message;
+    QString container, message, registeredHost, registeredContainer;
     QJsonObject binding;
     QUrl server;
     QByteArray credential;
@@ -35,6 +36,13 @@ public:
         : q(owner), account(session), discovery(service), bindAddress(bind), sync([this](auto peer, auto payload) {
             return server.isEmpty() ? lan.request(peer, payload) : relay.request(peer, payload);
         }) {
+        lan.setPairingAuthentication([this](const QByteArray &context) {
+            return account && account->signedIn() && account->pairingCredentials().value("scope").toString() == account->storageScope()
+                ? SocietyPairingCredentials::sign(account->pairingCredentials(), context) : QJsonObject{};
+        }, [this](const QByteArray &context, const QJsonObject &proof) {
+            return account && account->signedIn() && account->pairingCredentials().value("scope").toString() == account->storageScope()
+                && SocietyPairingCredentials::verify(account->pairingCredentials(), context, proof);
+        });
         timer.setInterval(1000);
         QObject::connect(&timer, &QTimer::timeout, q, [this] { update(); });
         QObject::connect(&sync, &iiSocietySync::Controller::progress, q, &Client::progress);
@@ -60,14 +68,17 @@ public:
         if (!account) account = new AccountSession(q);
         nearby = std::make_unique<NearbyDevices>(discovery, bindAddress, q);
         pairing = std::make_unique<AutomaticPairing>(nearby.get(), &lan, [] { return false; }, [this](const QString &link) {
-            return lan.join(link, nearby->deviceId(), nearby->deviceName());
+            iiServerHost::LanLink decoded;
+            return account && iiServerHost::LanLink::decode(link, &decoded) && decoded.hostId == accountHost()
+                && !accountContainer().isEmpty() && lan.join(link, nearby->deviceId(), nearby->deviceName());
         }, [this] { lan.stop(); }, q);
+        QObject::connect(account->manager()->account(), &iisacc::accounts::Account::changed, q, [this] { update(); });
         QObject::connect(account, &AccountSession::changed, q, [this] { update(); });
         QObject::connect(account, &AccountSession::pairingCredentialsChanged, q, [this] { update(); });
         QObject::connect(account, &AccountSession::pairingStateRestored, q, [this] { update(); });
         QObject::connect(account, &AccountSession::pairingCredentialsRequired, account, &AccountSession::requestPairingCredentials);
         QObject::connect(account, &AccountSession::sessionEnding, q, [this] { transportStop(); });
-        QObject::connect(nearby.get(), &NearbyDevices::identityEnding, &lan, &iiServerHost::LanPeer::cancelPairing);
+        QObject::connect(nearby.get(), &NearbyDevices::identityEnding, &lan, &iiServerHost::LanPeer::stop);
         QObject::connect(nearby.get(), &NearbyDevices::changed, q, [this] { peers(); });
     }
     void transportStop() {
@@ -78,15 +89,18 @@ public:
         lan.stop(); relay.stop(); server = QUrl(); credential.clear();
         lease.reset();
     }
+    QString accountHost() const { return account && account->signedIn() ? account->manager()->account()->societyContainerDrive().value("hostDeviceId").toString() : QString(); }
+    QString accountContainer() const { return account && account->signedIn() ? account->manager()->account()->societyContainerDrive().value("containerId").toString() : QString(); }
     void peers() {
         if (!active || !account || !account->signedIn() || !lease || !lease->isLocked()) return;
-        const auto host = binding.value("host").toString(); QStringList authorized;
+        const auto host = accountHost(); QStringList authorized;
         if (server.isEmpty()) {
             if (nearby->authenticated() && lan.connected() && lan.pairedDeviceIds().contains(host)) authorized.append(host);
         } else if (relay.isReady() && relay.accountId() == account->manager()->account()->sub()) {
             for (const auto &value : relay.peers()) if (value.toObject().value("peerId") == host) authorized.append(host);
         }
-        sync.setPeers(authorized, authorized);
+        if (host.isEmpty() || accountContainer().isEmpty()) authorized.clear();
+        sync.setPeers(authorized, authorized, host, accountContainer());
         online = !authorized.isEmpty();
         message = authorized.isEmpty() ? "Waiting for the Society host." : "Connected to the Society host.";
         if (authorized.isEmpty() && server.isEmpty() && pairing) message = pairing->status();
@@ -98,6 +112,10 @@ public:
         if (!active || !account || updating) return;
         QScopedValueRollback guard(updating, true);
         if (!account->signedIn()) { transportStop(); message = "Sign in to Society on this device to connect to its host."; emit q->changed(); return; }
+        if (registeredHost != accountHost() || registeredContainer != accountContainer()) {
+            registeredHost = accountHost(); registeredContainer = accountContainer(); transportStop();
+        }
+        if (lan.connected() && (!SocietyPairingCredentials::valid(account->pairingCredentials()) || !lan.pairedDeviceIds().contains(accountHost()))) lan.stop();
         const auto scope = account->storageScope();
         if (scope != binding.value("scope").toString()) { transportStop(); message = "The Society storage belongs to a different account."; emit q->changed(); return; }
         if (!lease) {
@@ -112,7 +130,7 @@ public:
         if (configured.isEmpty()) {
             if (!server.isEmpty()) { relay.stop(); server = QUrl(); credential.clear(); }
             nearby->setIdentity(scope, device.value("id").toString(), name, device.value("type").toString(), false);
-            nearby->setCredentials(account->pairingCredentials(), false, binding.value("host").toString());
+            nearby->setCredentials(account->pairingCredentials(), false, accountHost());
             pairing->setEnabled(account->automaticPairingEnabled());
             account->requestPairingCredentials();
         } else {
@@ -154,7 +172,7 @@ QString Client::status() const { return d->message; }
 bool Client::connected() const { return d->active && d->online; }
 QString Client::requestHost(const QJsonObject &payload) {
     if (!connected() || d->hostRequests.size() >= 64 || payload.value("op") != "society.generation") return {};
-    const auto host = d->binding.value("host").toString();
+    const auto host = d->accountHost();
     const auto id = d->server.isEmpty() ? d->lan.request(host, payload) : d->relay.request(host, payload);
     if (!id.isEmpty()) {
         d->hostRequests.insert(id);

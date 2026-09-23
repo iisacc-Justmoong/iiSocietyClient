@@ -1,3 +1,4 @@
+#include <iiAcountManager/GraphQL.h>
 #include "AccountSession.h"
 #include "DeviceInfo.h"
 #include "GroupSessionStore.h"
@@ -26,6 +27,7 @@ AccountSession::AccountSession(QObject *parent)
 AccountSession::AccountSession(const QUrl &serviceUrl, QObject *parent)
     : QObject(parent), m_manager(serviceUrl, &m_network) {
     m_manager.setDeviceInfo(societyAccountDevice(m_manager.deviceInfo()));
+    m_manager.setContainerDriveSyncEnabled(true);
     m_pairingExpiry.setSingleShot(true);
     connect(&m_pairingExpiry, &QTimer::timeout, this, [this] {
         if (validPairingCredentials(m_pairingCredentials)) { schedulePairingExpiry(); return; }
@@ -209,7 +211,7 @@ void AccountSession::requestPairingCredentials() {
     if (service.scheme() != "https" && !(service.scheme() == "http" && QHostAddress(service.host()).isLoopback())) return;
     const auto session = m_manager.loginSession().value("id").toString();
     auto device = m_manager.deviceInfo(); device.insert("pairingVersion", 2);
-    QNetworkRequest request(service.resolved(QUrl("/Account/Session/App")));
+    QNetworkRequest request(service.resolved(QUrl("/Account/GraphQL")));
     request.setRawHeader("Accept", "application/json");
     request.setRawHeader("Origin", service.adjusted(QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment | QUrl::RemoveUserInfo).toEncoded());
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -219,22 +221,24 @@ void AccountSession::requestPairingCredentials() {
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     request.setTransferTimeout(10000);
     m_pairingRequestBlocked = true;
-    auto *reply = m_network.post(request, QJsonDocument(QJsonObject{{"intent", "pairing"},
-        {"device", QJsonObject::fromVariantMap(device)}}).toJson(QJsonDocument::Compact));
+    auto *reply = m_network.post(request, iisacc::accounts::graphql::appSessionRequest(QJsonObject{{"intent", "pairing"},
+        {"device", QJsonObject::fromVariantMap(device)}}));
     m_pairingReply = reply;
     QTimer::singleShot(10000, reply, [reply] { if (!reply->isFinished()) reply->abort(); });
     connect(reply, &QNetworkReply::readyRead, this, [reply] { if (reply->bytesAvailable() > 8192) reply->abort(); });
     connect(reply, &QNetworkReply::finished, this, [this, reply, session, device] {
         m_pairingReply = nullptr; reply->deleteLater();
         if (!signedIn() || m_manager.loginSession().value("id").toString() != session) return;
-        const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 #ifdef SOCIETY_GROUP_STATE_RUNTIME_PROBE
-        qInfo("Society pairing response status=%d networkError=%d", status, int(reply->error()));
+        qInfo("Society pairing response status=%d networkError=%d", httpStatus, int(reply->error()));
 #endif
         if (reply->bytesAvailable() > 8192) { persistPairingState(); return; }
-        const auto body = reply->readAll();
+        const auto decoded = iisacc::accounts::graphql::decode(reply->readAll(), "appSession", httpStatus);
+        const auto status = decoded.status;
+        const auto body = decoded.body;
         if (m_manager.handleSessionResponse(status, body, session)) return;
-        if (reply->error() != QNetworkReply::NoError || status != 200) { persistPairingState(); return; }
+        if (!decoded.valid || reply->error() != QNetworkReply::NoError || status != 200) { persistPairingState(); return; }
         const auto proof = QJsonDocument::fromJson(body).object().value("pairing").toObject();
 #ifdef SOCIETY_GROUP_STATE_RUNTIME_PROBE
         qInfo("Society pairing metadata version=%d seeds=%lld valid=%d", proof.value("version").toInt(1),
@@ -258,7 +262,7 @@ void AccountSession::cancelLogin() { if (!signedIn()) m_manager.clear(); }
 QByteArray AccountSession::relayCredential() const {
     if (!signedIn()) return {};
     QByteArray credential;
-    const auto endpoint = m_manager.serviceUrl().resolved(QUrl("/Account/Session"));
+    const auto endpoint = m_manager.serviceUrl().resolved(QUrl("/Account/GraphQL"));
     for (const auto &cookie : m_network.cookieJar()->cookiesForUrl(endpoint)) {
         if (cookie.name() != "iisacc_auth_id" && cookie.name() != "iisacc_auth_refresh" && cookie.name() != "iisacc_login_session") continue;
         if (!credential.isEmpty()) credential += "; ";

@@ -1,4 +1,6 @@
 #include <QString>
+#include <QDir>
+#include <QStandardPaths>
 #include <QTimer>
 #include <iiAcountManager/SessionStore.h>
 #import <Foundation/Foundation.h>
@@ -10,14 +12,39 @@ NSString *groupIdentifier() {
     NSString *group = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"SocietyAppGroup"];
     return group.length ? group : @"group.com.iisacc.society";
 }
+#if TARGET_OS_OSX
+enum class StateLocation { Unavailable, AppGroup, Development };
+StateLocation stateLocation() {
+    SecCodeRef code = nullptr;
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &code) != errSecSuccess) return StateLocation::Unavailable;
+    CFDictionaryRef information = nullptr;
+    const auto status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information);
+    CFRelease(code);
+    if (status != errSecSuccess) return StateLocation::Unavailable;
+    NSDictionary *signing = CFBridgingRelease(information);
+    NSDictionary *entitlements = signing[(__bridge id)kSecCodeInfoEntitlementsDict];
+    // A URL from NSFileManager does not prove permission to a team-owned group.
+    // Unsandboxed local builds have no developer team. Give their encrypted
+    // state a distinct, stable location shared by the app and its helper.
+    if (!signing[(__bridge id)kSecCodeInfoTeamIdentifier]
+        && ![entitlements[@"com.apple.security.app-sandbox"] boolValue])
+        return StateLocation::Development;
+    return StateLocation::AppGroup;
+}
+#endif
 // The wrapping key has no app-sandbox restore marker. iOS uses the App Group's
 // Keychain access group, so reinstalling one participating app cannot orphan it.
 class AppleGroupKeyStore final : public iisacc::accounts::SessionStore {
 public:
     using SessionStore::SessionStore;
     NSMutableDictionary *query(const QString &key) {
+        NSString *service = [groupIdentifier() stringByAppendingString:@".encrypted-state"];
+#if TARGET_OS_OSX
+        if (stateLocation() == StateLocation::Development)
+            service = [groupIdentifier() stringByAppendingString:@".development.encrypted-state"];
+#endif
         NSMutableDictionary *result = [@{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService:[groupIdentifier() stringByAppendingString:@".encrypted-state"],
+            (__bridge id)kSecAttrService:service,
             (__bridge id)kSecAttrAccount:key.toNSString()} mutableCopy];
 #if TARGET_OS_IPHONE
         result[(__bridge id)kSecAttrAccessGroup] = groupIdentifier();
@@ -68,6 +95,17 @@ iisacc::accounts::SessionStore *societyAppleStateKeyStore(QObject *parent) { ret
 
 QString societyAppleStateDirectory() {
     @autoreleasepool {
+#if TARGET_OS_OSX
+        const auto location = stateLocation();
+        if (location == StateLocation::Unavailable) return {};
+        if (location == StateLocation::Development) {
+            const auto base = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+            const auto group = QString::fromNSString(groupIdentifier());
+            if (base.isEmpty() || group.contains('/') || group == "." || group == "..") return {};
+            return QDir(base).filePath("iisacc/Development Groups/" + group
+                + "/Library/Application Support/SocietyState");
+        }
+#endif
         NSURL *root = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupIdentifier()];
         if (!root) return {};
         return QString::fromNSString([[[root URLByResolvingSymlinksInPath]

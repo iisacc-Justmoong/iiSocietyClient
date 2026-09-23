@@ -41,3 +41,23 @@ QByteArray SocietyPairingCredentials::key(const QJsonObject &proof, qint64 epoch
     return QMessageAuthenticationCode::hash("society-auto-pair-key-v2\n" + proof.value("scope").toString().toUtf8()
         + '\n' + QByteArray::number(epoch), QByteArray::fromHex(seed.toLatin1()), QCryptographicHash::Sha256);
 }
+
+QJsonObject SocietyPairingCredentials::sign(const QJsonObject &credentials, const QByteArray &context) {
+    const auto epoch = QDateTime::currentSecsSinceEpoch() / 300;
+    const auto secret = key(credentials, epoch);
+    if (secret.isEmpty()) return {};
+    return {{"scope", credentials.value("scope")}, {"epoch", QString::number(epoch)},
+        {"mac", QString::fromLatin1(QMessageAuthenticationCode::hash("society-lan-account-v1\n" + context, secret, QCryptographicHash::Sha256).toHex())}};
+}
+bool SocietyPairingCredentials::verify(const QJsonObject &credentials, const QByteArray &context, const QJsonObject &proof) {
+    bool ok = false; const auto epoch = proof.value("epoch").toString().toLongLong(&ok);
+    const auto current = QDateTime::currentSecsSinceEpoch() / 300;
+    if (!ok || epoch < current - 1 || epoch > current + 1 || proof.value("scope") != credentials.value("scope")) return false;
+    const auto secret = key(credentials, epoch);
+    if (secret.isEmpty() || !hexKey(proof.value("mac").toString())) return false;
+    const auto expected = QMessageAuthenticationCode::hash("society-lan-account-v1\n" + context, secret, QCryptographicHash::Sha256).toHex();
+    const auto actual = proof.value("mac").toString().toLatin1();
+    unsigned difference = 0;
+    for (qsizetype i = 0; i < expected.size(); ++i) difference |= static_cast<unsigned char>(expected[i] ^ actual[i]);
+    return difference == 0;
+}
