@@ -54,3 +54,5 @@ iiAcountManager 0.2.8 이상이 필요하다. 로그인과 컨테이너 위치 �
 검증한다. 암호화 저장·삭제·재실행 검사는 Society.GroupState에서 수행한다.
 
 LAN clients require server-issued account pairing proofs. Both LAN and relay select the host and container in the authenticated account `societyContainerDrive`; missing registration or another host grants no synchronization. The registered replacement host adopts a fresh mirror while retaining previous files in recovery.
+
+Apple keychain reads, writes and duplicate-item checks execute on worker threads. Completion returns to the session store thread and is cancelled when its QObject is destroyed. Keychain access prompts therefore cannot block the Society or consumer application event loop; existing access controls and encrypted state are preserved.

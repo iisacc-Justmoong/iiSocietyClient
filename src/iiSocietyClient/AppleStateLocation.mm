@@ -1,7 +1,8 @@
 #include <QString>
 #include <QDir>
 #include <QStandardPaths>
-#include <QTimer>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <iiAcountManager/SessionStore.h>
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -51,43 +52,55 @@ public:
 #endif
         return result;
     }
-    void read(const QString &key, Completion done) override {
-        QTimer::singleShot(0, this, [this, key, done] {
-            @autoreleasepool {
-                auto *q = query(key); q[(__bridge id)kSecReturnData] = @YES;
-                q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-#if TARGET_OS_IPHONE
-                q[(__bridge id)kSecUseAuthenticationUI] = (__bridge id)kSecUseAuthenticationUIFail;
-#endif
-                CFTypeRef value = nullptr;
-                const auto status = SecItemCopyMatching((__bridge CFDictionaryRef)q, &value);
-                if (status != errSecSuccess && status != errSecItemNotFound) qWarning("Society group key read failed: %d", int(status));
-                NSData *data = CFBridgingRelease(value);
-                done({status == errSecSuccess ? Error::None : status == errSecItemNotFound ? Error::Missing : Error::Unavailable,
-                    status == errSecSuccess ? QByteArray(static_cast<const char *>(data.bytes), data.length) : QByteArray()});
-            }
+    void run(std::function<Result()> operation, Completion done) {
+        auto *watcher = new QFutureWatcher<Result>(this);
+        connect(watcher, &QFutureWatcher<Result>::finished, this, [watcher, done] {
+            const auto result = watcher->result(); watcher->deleteLater(); done(result);
         });
+        watcher->setFuture(QtConcurrent::run(std::move(operation)));
+    }
+    static Result readQuery(NSMutableDictionary *q) {
+        q[(__bridge id)kSecReturnData] = @YES;
+        q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+#if TARGET_OS_IPHONE
+        q[(__bridge id)kSecUseAuthenticationUI] = (__bridge id)kSecUseAuthenticationUIFail;
+#endif
+        CFTypeRef value = nullptr;
+        const auto status = SecItemCopyMatching((__bridge CFDictionaryRef)q, &value);
+        if (status != errSecSuccess && status != errSecItemNotFound) qWarning("Society group key read failed: %d", int(status));
+        NSData *data = CFBridgingRelease(value);
+        return {status == errSecSuccess ? Error::None : status == errSecItemNotFound ? Error::Missing : Error::Unavailable,
+            status == errSecSuccess ? QByteArray(static_cast<const char *>(data.bytes), data.length) : QByteArray()};
+    }
+    void read(const QString &key, Completion done) override {
+        auto *q = query(key);
+        run([q] { @autoreleasepool { return readQuery(q); } }, std::move(done));
     }
     void write(const QString &key, const QByteArray &data, Completion done) override {
-        QTimer::singleShot(0, this, [this, key, data, done] {
+        auto *q = query(key);
+        run([q, data] {
             @autoreleasepool {
-                auto *q = query(key); q[(__bridge id)kSecValueData] = [NSData dataWithBytes:data.constData() length:data.size()];
+                auto *insert = [q mutableCopy];
+                insert[(__bridge id)kSecValueData] = [NSData dataWithBytes:data.constData() length:data.size()];
 #if TARGET_OS_IPHONE
-                q[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+                insert[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
 #endif
-                const auto status = SecItemAdd((__bridge CFDictionaryRef)q, nullptr);
-                if (status != errSecSuccess && status != errSecDuplicateItem) qWarning("Society group key write failed: %d", int(status));
+                const auto status = SecItemAdd((__bridge CFDictionaryRef)insert, nullptr);
                 if (status == errSecDuplicateItem) {
-                    read(key, [data, done](Result existing) { done({existing.error == Error::None && existing.data == data ? Error::None : Error::Unavailable, {}}); });
-                } else done({status == errSecSuccess ? Error::None : Error::Unavailable, {}});
+                    const auto existing = readQuery(q);
+                    return Result{existing.error == Error::None && existing.data == data ? Error::None : Error::Unavailable, {}};
+                }
+                if (status != errSecSuccess) qWarning("Society group key write failed: %d", int(status));
+                return Result{status == errSecSuccess ? Error::None : Error::Unavailable, {}};
             }
-        });
+        }, std::move(done));
     }
     void remove(const QString &key, Completion done) override {
-        QTimer::singleShot(0, this, [this, key, done] {
-            const auto status = SecItemDelete((__bridge CFDictionaryRef)query(key));
-            done({status == errSecSuccess || status == errSecItemNotFound ? Error::None : Error::Unavailable, {}});
-        });
+        auto *q = query(key);
+        run([q] { @autoreleasepool {
+            const auto status = SecItemDelete((__bridge CFDictionaryRef)q);
+            return Result{status == errSecSuccess || status == errSecItemNotFound ? Error::None : Error::Unavailable, {}};
+        } }, std::move(done));
     }
 };
 }

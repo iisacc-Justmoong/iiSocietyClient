@@ -19,6 +19,8 @@ target_include_directories(iiSocietyClient PUBLIC "$<BUILD_INTERFACE:${CMAKE_CUR
 target_link_libraries(iiSocietyClient PUBLIC iiSocietySync::iiSocietySync iiAcountManager::iiAcountManager Qt6::Network)
 set_target_properties(iiSocietyClient PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_EXTENSIONS OFF)
 if(APPLE)
+    find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Concurrent)
+    target_link_libraries(iiSocietyClient PRIVATE Qt6::Concurrent)
     enable_language(OBJCXX)
     target_sources(iiSocietyClient PRIVATE src/iiSocietyClient/AppleStateLocation.mm)
     set_source_files_properties(src/iiSocietyClient/AppleStateLocation.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")

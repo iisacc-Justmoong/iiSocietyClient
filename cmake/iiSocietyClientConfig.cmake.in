@@ -5,5 +5,10 @@ find_dependency(iiAcountManager 0.2.8 CONFIG)
 if(NOT IOS AND NOT ANDROID)
     find_dependency(OpenSSL 3 COMPONENTS Crypto)
 endif()
-include("${CMAKE_CURRENT_LIST_DIR}/iiSocietyClientTargets.cmake")
+
 check_required_components(iiSocietyClient)
+
+if(APPLE)
+    find_dependency(Qt6 6.8.3 EXACT COMPONENTS Concurrent)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/iiSocietyClientTargets.cmake")

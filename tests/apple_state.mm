@@ -4,6 +4,7 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <QTest>
+#include <QThread>
 #import <Security/Security.h>
 
 iisacc::accounts::SessionStore *societyAppleStateKeyStore(QObject *parent);
@@ -39,11 +40,13 @@ private slots:
         const QByteArray fixture("Synthetic Society storage verification");
         using Store = iisacc::accounts::SessionStore;
         Store::Result result; bool done = false;
-        keys->write(key, fixture, [&](auto value) { result = value; done = true; });
+        keys->write(key, fixture, [&](auto value) { QCOMPARE(QThread::currentThread(), thread()); result = value; done = true; });
+        QVERIFY(!done);
         QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
         QCOMPARE(result.error, Store::Error::None);
         done = false;
-        keys->read(key, [&](auto value) { result = value; done = true; });
+        keys->read(key, [&](auto value) { QCOMPARE(QThread::currentThread(), thread()); result = value; done = true; });
+        QVERIFY(!done);
         QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
         const bool matched = result.error == Store::Error::None && result.data == fixture;
         done = false;
@@ -52,7 +55,8 @@ private slots:
         QCOMPARE(result.error, Store::Error::None);
         QVERIFY(matched);
         done = false;
-        keys->read(key, [&](auto value) { result = value; done = true; });
+        keys->read(key, [&](auto value) { QCOMPARE(QThread::currentThread(), thread()); result = value; done = true; });
+        QVERIFY(!done);
         QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
         QCOMPARE(result.error, Store::Error::Missing);
     }
