@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QHostAddress>
 #include <QCryptographicHash>
+#include <iiServerHost.h>
 
 using iisacc::accounts::AccountManager;
 
@@ -41,6 +42,7 @@ AccountSession::AccountSession(const QUrl &serviceUrl, QObject *parent)
         if (signedIn()) m_pairingSessionEnding = false;
         else {
             m_serverConfiguration = {};
+            m_hostConnection = {};
             m_verifiedThisRun = false; clearPairingCredentials();
             ++m_pairingRevision; m_pairingLoadedSession.clear(); m_pairingLoading = false; m_rememberedPeers = {};
         }
@@ -139,6 +141,7 @@ void AccountSession::restorePairingState() {
         if (valid) {
             self->m_automaticPairingEnabled = record.value("automaticEnabled").toBool(true);
             self->m_serverConfiguration = record.value("server").toObject();
+            self->m_hostConnection = record.value("hostConnection").toObject();
             self->m_rememberedPeers = record.value("peers").toArray();
             if (self->m_rememberedPeers.size() > 128) self->m_rememberedPeers = {};
             if (self->validPairingCredentials(proof)) self->m_pairingCredentials = proof;
@@ -155,7 +158,8 @@ void AccountSession::persistPairingState() {
     if (!m_stateStore || !signedIn() || m_pairingLoading || m_pairingSessionEnding) return;
     const QJsonObject record{{"schemaVersion", 3}, {"binding", QJsonObject::fromVariantMap(m_manager.sessionBinding())},
         {"credentials", m_pairingCredentials}, {"automaticEnabled", m_automaticPairingEnabled},
-        {"peers", m_rememberedPeers}, {"requestBlocked", m_pairingRequestBlocked}, {"server", m_serverConfiguration}};
+        {"peers", m_rememberedPeers}, {"requestBlocked", m_pairingRequestBlocked}, {"server", m_serverConfiguration},
+        {"hostConnection", m_hostConnection}};
     const auto revision = ++m_pairingRevision;
     const QPointer<AccountSession> guard(this);
     m_stateStore->write(pairingStateKey(), QJsonDocument(record).toJson(QJsonDocument::Compact), [guard, revision](iisacc::accounts::SessionStore::Result result) {
@@ -171,6 +175,7 @@ void AccountSession::discardPairingState() {
     m_pairingLoadedSession.clear(); m_pairingStorageError.clear(); m_pairingRestoreRetryAt = {};
     m_pairingLoading = false; m_rememberedPeers = {}; m_automaticPairingEnabled = true;
     m_serverConfiguration = {};
+    m_hostConnection = {};
     m_verifiedThisRun = false;
     if (m_stateStore) m_stateStore->remove(pairingStateKey(), [](auto) {});
 }
@@ -192,6 +197,31 @@ void AccountSession::rememberPairedDevice(const QString &id, const QString &name
         {"lastPairedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}});
     persistPairingState();
     emit rememberedDevicesChanged();
+}
+QJsonObject AccountSession::savedHostConnection() const {
+    const auto drive = m_manager.account()->societyContainerDrive();
+    if (!signedIn() || m_hostConnection.value("scope").toString() != storageScope()
+        || m_hostConnection.value("host").toString().isEmpty()
+        || m_hostConnection.value("host").toString() != drive.value("hostDeviceId").toString()
+        || m_hostConnection.value("container").toString().isEmpty()
+        || m_hostConnection.value("container").toString() != drive.value("containerId").toString()) return {};
+    return m_hostConnection;
+}
+bool AccountSession::rememberHostConnection(const QString &host, const QString &container, const QJsonArray &routes) {
+    const auto drive = m_manager.account()->societyContainerDrive();
+    if (!signedIn() || m_pairingLoading || m_pairingSessionEnding || host.isEmpty() || container.isEmpty()
+        || host != drive.value("hostDeviceId").toString() || container != drive.value("containerId").toString()) return false;
+    QJsonArray safe;
+    for (const auto &value : routes) {
+        const auto route = value.toObject();
+        const auto address = route.value("address").toString(); const int port = route.value("port").toInt();
+        if (iiServerHost::LanLink::localAddress(address) && port > 0 && port <= 65535 && safe.size() < 8)
+            safe.append(QJsonObject{{"address", address}, {"port", port}});
+    }
+    if (safe.isEmpty()) safe = savedHostConnection().value("routes").toArray();
+    const QJsonObject connection{{"scope", storageScope()}, {"host", host}, {"container", container}, {"routes", safe}};
+    if (connection == m_hostConnection) return true;
+    m_hostConnection = connection; persistPairingState(); return true;
 }
 
 void AccountSession::clearPairingCredentials() {

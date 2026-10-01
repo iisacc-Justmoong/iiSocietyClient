@@ -1,5 +1,32 @@
 # iiSocietyClient
 
+## Saved host reconnection
+
+The encrypted group-session record retains the current registered host/container
+binding and up to eight private LAN address/UDP-port hints. `savedHostConnection()`
+returns nothing after account, host or container changes or logout. Routes are
+not authentication and are never exposed as credentials through QML.
+
+On restart, `NearbyDevices::resumeHost()` immediately sends an account-signed
+five-second discovery challenge to saved routes, alongside ordinary Bonjour/BLE
+discovery. The registered host returns its fresh signed discovery record and the
+challenge. The caller validates account scope, host identity, source address,
+challenge, lifetime and record signature before feeding normal automatic TLS
+pairing. The host validates the client's current signed record first. No old QR,
+TLS socket, proof or execution nonce is restored; TLS pinning and fresh mutual
+account authentication remain mandatory. Probes retry at five-second intervals
+and stop when connected, paused or inactive. Old hosts ignore the additional
+message and ordinary discovery remains the fallback for changed addresses.
+When a verified device returns with a fresh process nonce, stale discovery
+routes and any invitation for its old process are retired immediately rather
+than waiting for the automatic pairing attempt's 20-second timeout.
+Nonces retired by a fresh authenticated resume exchange are ignored in delayed
+Bonjour callbacks for 70 seconds (bounded to 128 entries). A fresh resume proof
+can reactivate that process; signed but stale discovery alone cannot roll it back.
+
+Tests cover restart persistence, wrong-host rejection, logout, recovery without
+Bonjour announcements, and rejection of a saved route with a wrong account key.
+
 Society와 소비 앱이 공유하는 인증·검색·선택 다운로드 세션이다. Society UI 프로세스가 중단되어도 앱 내부에서 같은 App Group의 Society 컨테이너와 인증 세션을 사용한다. 호스트의 확인된 namespace와 기존 TLS/HMAC 페어링을 유지한다.
 
 `Client::start(container)`는 기존 Society replica를 열고 메타데이터와 로컬 제출을 동기화한다. `StorageMap::request(keys)`는 특정 버전을 고정한 다운로드 요청을 디스크에 남긴다. `Client::synchronizeNow()`로 처리를 촉진하고 `StorageMap::requestState(id)`의 ready 이후에만 파일을 사용한다. 취소·실패 시 검증되지 않은 부분 파일은 공개 경로에 나타나지 않는다.

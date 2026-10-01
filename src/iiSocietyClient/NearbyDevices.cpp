@@ -33,7 +33,8 @@ bool validRecord(const QJsonObject &r) {
 NearbyDevices::NearbyDevices(QObject *parent) : NearbyDevices(nullptr, QHostAddress::AnyIPv4, parent) {}
 NearbyDevices::NearbyDevices(DiscoveryService *service, QHostAddress bindAddress, QObject *parent)
     : QObject(parent), m_service(service ? service : DiscoveryService::create(this)), m_bindAddress(bindAddress) {
-    connect(m_service, &DiscoveryService::found, this, &NearbyDevices::found);
+    connect(m_service, &DiscoveryService::found, this, [this](const QString &service, const QJsonObject &record,
+        const QHostAddress &address, quint16 port) { found(service, record, address, port); });
     connect(m_service, &DiscoveryService::lost, this, [this](const QString &key) {
         const auto removed = m_endpoints.removeIf([&](const auto &item) { return item.value().service == key; });
         if (removed) emit changed();
@@ -64,7 +65,8 @@ void NearbyDevices::setIdentity(const QString &scope, const QString &id, const Q
 void NearbyDevices::clear() {
     if (active() || !m_record.isEmpty()) emit identityEnding();
     cancel(); m_timer.stop(); m_service->stop(); m_socket.close(); m_record = {};
-    m_endpoints.clear(); m_seenRequests.clear(); m_error.clear(); m_retryAt = 0;
+    m_endpoints.clear(); m_seenRequests.clear(); m_retiredInstances.clear(); m_error.clear(); m_retryAt = 0;
+    m_resumeHost.clear(); m_resumeChallenge.clear(); m_resumeRoutes = {}; m_resumeAt = 0; m_resumeDeadline = 0;
     m_credentials = {}; emit changed();
 }
 bool NearbyDevices::authenticated() const {
@@ -122,19 +124,39 @@ void NearbyDevices::advertiseAuthentication() {
 bool NearbyDevices::localAddress(const QHostAddress &address) const {
     return iiServerHost::LanLink::localAddress(address.toString()) && (!address.isLoopback() || m_bindAddress.isLoopback());
 }
-void NearbyDevices::found(const QString &service, const QJsonObject &record, const QHostAddress &address, quint16 port) {
+void NearbyDevices::found(const QString &service, const QJsonObject &record, const QHostAddress &address, quint16 port, bool freshProof) {
     if (!active() || service.size() > 512 || !validRecord(record) || !port || !localAddress(address)
         || record.value("scope") != m_record.value("scope") || record.value("id") == m_record.value("id")) return;
     // Keep every address of this DNS-SD instance, while replacing endpoints
     // belonging to an older process/port when the instance changes.
+    const bool verified = verify(record);
+    const auto instance = record.value("id").toString() + '/' + record.value("nonce").toString();
+    if (freshProof) m_retiredInstances.remove(instance);
+    else if (m_retiredInstances.value(instance) > now()) return;
+    bool restarted = false;
     m_endpoints.removeIf([&](const auto &item) {
         const auto &old = item.value();
+        if (verified && old.record.value("id") == record.value("id")
+            && old.record.value("nonce") != record.value("nonce")) {
+            if (freshProof) {
+                if (m_retiredInstances.size() >= 128) m_retiredInstances.erase(m_retiredInstances.begin());
+                m_retiredInstances.insert(old.record.value("id").toString() + '/' + old.record.value("nonce").toString(), now() + 70000);
+            }
+            restarted = true; return true;
+        }
         return old.service == service && (old.port != port || old.record.value("id") != record.value("id")
             || old.record.value("nonce") != record.value("nonce"));
     });
     const auto key = service + '/' + address.toString();
     if (!m_endpoints.contains(key) && m_endpoints.size() >= 128) return;
-    m_endpoints.insert(key, {service, record, address, port, now()}); m_error.clear(); emit changed();
+    m_endpoints.insert(key, {service, record, address, port, now()}); m_error.clear();
+    // A fresh process cannot answer an invitation bound to its old nonce.
+    // Retire that attempt immediately instead of waiting for its 20s timeout.
+    if (restarted && (m_outgoing.value("to") == record.value("id")
+        || m_incoming.value("from") == record.value("id") || m_accepted.value("from") == record.value("id"))) {
+        cancel(); emit invitationEnded(tr("The other device restarted. Reconnecting."));
+    }
+    emit changed();
 }
 std::optional<NearbyDevices::Endpoint> NearbyDevices::endpoint(const QString &id, const QHostAddress &address, quint16 port) const {
     for (const auto &e : m_endpoints) if (e.record.value("id") == id && now() - e.seen < 25000
@@ -166,6 +188,72 @@ void NearbyDevices::send(const QJsonObject &packet, const Endpoint &e) {
         trace(sent == bytes.size() ? "datagram sent" : "datagram send failed");
     }
 }
+QJsonArray NearbyDevices::connectionHints(const QString &id) const {
+    QJsonArray result;
+    for (const auto &e : m_endpoints) {
+        if (e.record.value("id") != id || now() - e.seen >= 25000 || !verify(e.record)) continue;
+        const QJsonObject hint{{"address", e.address.toString()}, {"port", e.port}};
+        if (!result.contains(hint) && result.size() < 8) result.append(hint);
+    }
+    return result;
+}
+void NearbyDevices::resumeHost(const QString &host, const QJsonArray &routes) {
+    if (host.isEmpty()) { m_resumeHost.clear(); m_resumeRoutes = {}; m_resumeChallenge.clear(); return; }
+    if (!authenticated() || desktop() || host != primaryHost() || !token(host)) return;
+    QJsonArray safe;
+    for (const auto &value : routes) {
+        const auto route = value.toObject(); const QHostAddress address(route.value("address").toString());
+        const int port = route.value("port").toInt();
+        if (localAddress(address) && port > 0 && port <= 65535 && safe.size() < 8)
+            safe.append(QJsonObject{{"address", address.toString()}, {"port", port}});
+    }
+    if (host == m_resumeHost && safe == m_resumeRoutes) return;
+    m_resumeHost = host; m_resumeRoutes = safe; m_resumeAt = 0; sendResume();
+}
+void NearbyDevices::sendResume() {
+    if (!authenticated() || m_resumeHost != primaryHost() || m_resumeRoutes.isEmpty() || now() < m_resumeAt) return;
+    m_resumeChallenge = nonce(); m_resumeDeadline = now() + 5000; m_resumeAt = now() + 5000;
+    const auto packet = sign({{"v", "1"}, {"op", "resume"}, {"scope", m_record.value("scope")},
+        {"from", deviceId()}, {"to", m_resumeHost}, {"request", m_resumeChallenge},
+        {"expires", QString::number(m_resumeDeadline)}, {"record", m_record}});
+    for (const auto &value : m_resumeRoutes) {
+        const auto route = value.toObject();
+        send(packet, {{}, {}, QHostAddress(route.value("address").toString()), quint16(route.value("port").toInt()), now()});
+    }
+}
+bool NearbyDevices::receiveResume(const QJsonObject &p, const QHostAddress &address, quint16 port) {
+    const auto op = p.value("op").toString();
+    if (op != "resume" && op != "resume-ready") return false;
+    const auto record = p.value("record").toObject();
+    const auto request = p.value("request").toString();
+    const auto expires = p.value("expires").toString().toLongLong();
+    if (p.value("v") != "1" || p.value("to") != deviceId() || p.value("scope") != m_record.value("scope")
+        || !token(request) || expires <= now() || expires > now() + 6000 || !validRecord(record)
+        || record.value("id") != p.value("from") || record.value("id") == deviceId()
+        || record.value("scope") != m_record.value("scope") || !verify(p) || !verify(record)) return true;
+    if (op == "resume") {
+        // Reacquire fresh discovery only, never grant Files or skip TLS pairing.
+        // A registered host can hear its returning client without Bonjour delay.
+        if (!automaticHostAvailable() || primaryHost() != deviceId() || record.value("primary") != deviceId()
+            || record.value("host") != "0" || m_seenRequests.contains(request) || m_seenRequests.size() >= 128) return true;
+        m_seenRequests.insert(request, expires);
+        send(sign({{"v", "1"}, {"op", "resume-ready"}, {"scope", m_record.value("scope")},
+            {"from", deviceId()}, {"to", record.value("id")}, {"request", request},
+            {"expires", p.value("expires")}, {"record", m_record}}), {{}, {}, address, port, now()});
+    } else {
+        if (desktop() || p.value("from") != m_resumeHost || request != m_resumeChallenge || now() >= m_resumeDeadline
+            || record.value("autoHost") != "1" || record.value("primary") != m_resumeHost) return true;
+        bool expected = false;
+        for (const auto &value : m_resumeRoutes) {
+            const auto route = value.toObject();
+            expected |= QHostAddress(route.value("address").toString()) == address && route.value("port").toInt() == port;
+        }
+        if (!expected) return true;
+        m_resumeChallenge.clear();
+    }
+    found("resume:" + record.value("id").toString(), record, address, port, true);
+    return true;
+}
 bool NearbyDevices::invite(const QString &id, const QString &text, bool automatic) {
     const auto peer = endpoint(id); iiServerHost::LanLink link;
     if (!active() || m_record.value("host") != "1" || !peer || !iiServerHost::LanLink::decode(text, &link)
@@ -188,6 +276,7 @@ void NearbyDevices::receive() {
         const auto datagram = m_socket.receiveDatagram();
         if (!localAddress(datagram.senderAddress())) continue;
         const auto p = QJsonDocument::fromJson(datagram.data()).object();
+        if (receiveResume(p, datagram.senderAddress(), datagram.senderPort())) continue;
         // Bonjour can discover one device on several interfaces. The received
         // source must match an observed endpoint, not an arbitrary hash entry.
         const auto peer = endpoint(p.value("from").toString(), datagram.senderAddress(), datagram.senderPort());
@@ -206,7 +295,14 @@ void NearbyDevices::receive() {
         const auto op = p.value("op").toString();
         const bool automatic = p.value("automatic") == "1";
         if (automatic && (!verify(p) || !verify(peer->record) || p.value("nonce") != m_record.value("nonce")
-            || p.value("senderNonce") != peer->record.value("nonce"))) { trace("datagram account proof or instance nonce rejected"); continue; }
+            || p.value("senderNonce") != peer->record.value("nonce"))) {
+            if (qEnvironmentVariableIntValue("SOCIETY_DISCOVERY_TRACE") == 1)
+                qInfo() << "Society pairing: rejected" << op << "host" << desktop()
+                    << "packetProof" << verify(p) << "recordProof" << verify(peer->record)
+                    << "recipientInstance" << (p.value("nonce") == m_record.value("nonce"))
+                    << "senderInstance" << (p.value("senderNonce") == peer->record.value("nonce"));
+            continue;
+        }
         if (op == "invite") {
             iiServerHost::LanLink link; const auto request = p.value("request").toString();
             if (peer->record.value("host") != "1" || p.value("nonce") != m_record.value("nonce") || m_seenRequests.contains(request)
@@ -280,9 +376,11 @@ void NearbyDevices::tick() {
         m_credentials = {}; emit authenticationEnding();
     }
     advertiseAuthentication();
+    sendResume();
     bool removed = false;
     for (const auto &key : m_endpoints.keys()) if (now() - m_endpoints.value(key).seen >= 25000) { m_endpoints.remove(key); removed = true; }
     for (const auto &key : m_seenRequests.keys()) if (m_seenRequests.value(key) <= now()) m_seenRequests.remove(key);
+    for (const auto &key : m_retiredInstances.keys()) if (m_retiredInstances.value(key) <= now()) m_retiredInstances.remove(key);
     if (m_seenRequests.size() > 128) m_seenRequests.clear();
     if (m_retryAt && now() >= m_retryAt) { m_retryAt = 0; m_service->stop(); m_service->start(m_record, m_socket.localPort()); }
     if (!m_incoming.isEmpty() && m_incoming.value("expires").toString().toLongLong() <= now()) { m_incoming = {}; removed = true; }

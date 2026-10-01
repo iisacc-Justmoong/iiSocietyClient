@@ -8,6 +8,7 @@
 #include "AccountServer.h"
 #include "MemorySessionStore.h"
 #include "FakeDiscoveryService.h"
+#include "PairingCredentialsFixture.h"
 #include <QDir>
 #include <QFile>
 #include <QSignalSpy>
@@ -16,6 +17,84 @@
 class ClientTests : public QObject {
     Q_OBJECT
 private slots:
+    void savedHostRoutesReconnectWithoutBonjourAndRequireFreshProof() {
+        FakeDiscoveryService hostService, firstService;
+        NearbyDevices host(&hostService, QHostAddress::LocalHost), first(&firstService, QHostAddress::LocalHost);
+        const QString scope(64, 'a');
+        const auto credentials = localPairingCredentialsFixture(scope);
+        host.setIdentity(scope, "host", "Host", "pc", true);
+        host.setCredentials(credentials, true, "host");
+        first.setIdentity(scope, "phone", "Phone", "phone", false);
+        first.setCredentials(credentials, false, "host");
+        hostService.announceTo(firstService);
+        firstService.announceTo(hostService);
+        const auto routes = first.connectionHints("host");
+        QCOMPARE(routes.size(), 1);
+        const auto staleRecord = firstService.record;
+        const auto stalePort = firstService.port;
+        iiServerHost::LanPeer transport;
+        QVERIFY(transport.startHost("host", "Host", [](const auto &, const auto &) { return QJsonObject{}; },
+            {"127.0.0.1"}, QHostAddress::LocalHost));
+        QVERIFY(host.invite("phone", transport.createDeviceOffer("phone"), true));
+        QSignalSpy retired(&host, &NearbyDevices::invitationEnded);
+        first.clear();
+        FakeDiscoveryService restoredService;
+        NearbyDevices restored(&restoredService, QHostAddress::LocalHost);
+        restored.setIdentity(scope, "phone", "Phone", "phone", false);
+        restored.setCredentials(credentials, false, "host");
+        restored.resumeHost("unregistered-host", routes);
+        QTest::qWait(50); QVERIFY(restored.devices().isEmpty());
+        restored.resumeHost("host", routes);
+        QTRY_COMPARE(restored.devices().size(), 1);
+        QVERIFY(restored.devices().first().toMap().value("verified").toBool());
+        QTRY_COMPARE(host.devices().size(), 1);
+        QVERIFY(host.devices().first().toMap().value("verified").toBool());
+        QCOMPARE(retired.size(), 1); // No 20-second wait for an old process invitation.
+        // A delayed Bonjour callback must not replace the freshly challenged
+        // process with the prior launch and restart its pairing timeout.
+        emit hostService.found("delayed-bonjour", staleRecord, QHostAddress::LocalHost, stalePort);
+        QCOMPARE(host.connectionHints("phone"), QJsonArray({QJsonObject{
+            {"address", "127.0.0.1"}, {"port", restoredService.port}}}));
+        // Hints only route a fresh challenge. They never restore authentication.
+        FakeDiscoveryService wrongService;
+        NearbyDevices wrong(&wrongService, QHostAddress::LocalHost);
+        wrong.setIdentity(scope, "other", "Other", "phone", false);
+        wrong.setCredentials(localPairingCredentialsFixture(scope, 'f'), false, "host");
+        wrong.resumeHost("host", routes);
+        QTest::qWait(150);
+        QVERIFY(wrong.devices().isEmpty());
+        QCOMPARE(host.devices().size(), 1);
+        restored.clear();
+        QVERIFY(restored.connectionHints("host").isEmpty());
+    }
+    void hostConnectionIsPersistedAndBoundToTheAccountDrive() {
+        AccountServer authority; QVERIFY(authority.server.listen(QHostAddress::LocalHost));
+        const QString host(64, 'a'), container("b413adf3-0642-4565-941f-aa1940d25c51");
+        authority.profile.insert("societyContainerDrive", QJsonObject{{"hostDeviceId", host}, {"containerId", container},
+            {"imagePath", "/Volumes/Society.sparsebundle"}, {"revision", "1d02e288-9704-4c5a-979e-f9b60d1799ca"}});
+        MemorySessionStore state;
+        const QJsonArray routes{QJsonObject{{"address", "192.168.1.5"}, {"port", 4000}}};
+        {
+            AccountSession account(authority.url(), &state, nullptr);
+            QVERIFY(account.login("builder@example.com", "FixtureOnly1!"));
+            QTRY_VERIFY(account.signedIn() && !account.busy());
+            QTRY_VERIFY(account.rememberHostConnection(host, container, routes));
+            QCOMPARE(account.savedHostConnection().value("routes").toArray(), routes);
+            QVERIFY(!account.rememberHostConnection("another-host", container, routes));
+            QTest::qWait(50);
+        }
+        AccountSession restored(authority.url(), &state, nullptr);
+        QTRY_VERIFY(restored.signedIn());
+        QTRY_COMPARE(restored.savedHostConnection().value("routes").toArray(), routes);
+        auto changedDrive = authority.profile.value("societyContainerDrive").toObject();
+        changedDrive.insert("hostDeviceId", QString(64, 'b'));
+        authority.profile.insert("societyContainerDrive", changedDrive);
+        bool refreshed = false;
+        QTRY_VERIFY(refreshed || (refreshed = restored.manager()->refreshContainerDrive()));
+        QTRY_VERIFY(restored.savedHostConnection().isEmpty());
+        QVERIFY(restored.logout()); QTRY_VERIFY(!restored.signedIn());
+        QVERIFY(restored.savedHostConnection().isEmpty());
+    }
     void accountProofRejectsTamperingExpiryAndCrossAccount() {
         AccountServer authority; QVERIFY(authority.server.listen(QHostAddress::LocalHost));
         MemorySessionStore state; AccountSession account(authority.url(), &state, nullptr);

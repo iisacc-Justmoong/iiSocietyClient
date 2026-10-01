@@ -6,6 +6,7 @@
 #include <QTimer>
 #include <QUdpSocket>
 #include <QVariantList>
+#include <QJsonArray>
 #include <optional>
 
 class IISOCIETYCLIENT_EXPORT NearbyDevices final : public QObject {
@@ -42,6 +43,8 @@ public:
     void decline();
     void cancel();
     void complete();
+    QJsonArray connectionHints(const QString &id) const;
+    void resumeHost(const QString &host, const QJsonArray &routes);
 signals:
     void identityEnding();
     void authenticationEnding();
@@ -51,7 +54,7 @@ signals:
 private:
     struct Endpoint { QString service; QJsonObject record; QHostAddress address; quint16 port; qint64 seen; };
     bool localAddress(const QHostAddress &address) const;
-    void found(const QString &service, const QJsonObject &record, const QHostAddress &address, quint16 port);
+    void found(const QString &service, const QJsonObject &record, const QHostAddress &address, quint16 port, bool freshProof = false);
     void receive();
     void tick();
     void send(const QJsonObject &packet, const Endpoint &endpoint);
@@ -59,6 +62,8 @@ private:
     bool verify(QJsonObject packet) const;
     QJsonObject reply(const QJsonObject &invitation, const QString &operation) const;
     void advertiseAuthentication();
+    void sendResume();
+    bool receiveResume(const QJsonObject &packet, const QHostAddress &address, quint16 port);
     std::optional<Endpoint> endpoint(const QString &id, const QHostAddress &address = {}, quint16 port = 0) const;
     DiscoveryService *m_service;
     QHostAddress m_bindAddress;
@@ -67,7 +72,11 @@ private:
     QJsonObject m_record, m_incoming, m_outgoing, m_accepted, m_credentials;
     QHash<QString, Endpoint> m_endpoints;
     QHash<QString, qint64> m_seenRequests;
+    QHash<QString, qint64> m_retiredInstances;
     QString m_error;
     QString m_remoteVerificationCode;
     qint64 m_nextSend = 0, m_retryAt = 0;
+    QString m_resumeHost, m_resumeChallenge;
+    QJsonArray m_resumeRoutes;
+    qint64 m_resumeAt = 0, m_resumeDeadline = 0;
 };

@@ -58,6 +58,8 @@ public:
         QObject::connect(&lan, &iiServerHost::LanPeer::completed, q, response);
         QObject::connect(&relay, &iiServerHost::Peer::completed, q, response);
         QObject::connect(&lan, &iiServerHost::LanPeer::paired, q, [this](const QString &host) {
+            if (account && nearby && host == accountHost())
+                account->rememberHostConnection(host, accountContainer(), nearby->connectionHints(host));
             if (nearby) nearby->complete(); update();
         });
         QObject::connect(&relay, &iiServerHost::Peer::peersChanged, q, [this] { update(); });
@@ -102,6 +104,7 @@ public:
         if (host.isEmpty() || accountContainer().isEmpty()) authorized.clear();
         sync.setPeers(authorized, authorized, host, accountContainer());
         online = !authorized.isEmpty();
+        if (nearby && online) nearby->resumeHost({}, {});
         message = authorized.isEmpty() ? "Waiting for the Society host." : "Connected to the Society host.";
         if (authorized.isEmpty() && server.isEmpty() && pairing) message = pairing->status();
         if (authorized.isEmpty() && !server.isEmpty() && !relay.errorString().isEmpty()) message = relay.errorString();
@@ -132,6 +135,9 @@ public:
             nearby->setIdentity(scope, device.value("id").toString(), name, device.value("type").toString(), false);
             nearby->setCredentials(account->pairingCredentials(), false, accountHost());
             pairing->setEnabled(account->automaticPairingEnabled());
+            if (pairing->enabled() && !lan.connected())
+                nearby->resumeHost(accountHost(), account->savedHostConnection().value("routes").toArray());
+            else nearby->resumeHost({}, {});
             account->requestPairingCredentials();
         } else {
             pairing->setEnabled(false); nearby->clear();

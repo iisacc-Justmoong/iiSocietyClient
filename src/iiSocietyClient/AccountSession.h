@@ -52,6 +52,10 @@ public:
     bool setServerConfiguration(const QJsonObject &configuration);
     void setAutomaticPairingEnabled(bool enabled);
     void rememberPairedDevice(const QString &id, const QString &name, const QString &kind);
+    // Encrypted routing hints, scoped to the current account's registered drive.
+    // They grant no peer access; every reconnect still authenticates freshly.
+    QJsonObject savedHostConnection() const;
+    bool rememberHostConnection(const QString &host, const QString &container, const QJsonArray &routes);
     void requestPairingCredentials();
     Q_INVOKABLE bool login(const QString &email, const QString &password);
     Q_INVOKABLE bool refresh();
@@ -79,6 +83,7 @@ private:
     QPointer<QNetworkReply> m_pairingReply;
     QJsonObject m_pairingCredentials;
     QJsonObject m_serverConfiguration;
+    QJsonObject m_hostConnection;
     QDateTime m_pairingRestoreRetryAt;
     QTimer m_pairingExpiry;
     QPointer<iisacc::accounts::SessionStore> m_stateStore;
