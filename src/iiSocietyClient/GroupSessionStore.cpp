@@ -11,6 +11,11 @@
 #include <QTimer>
 #include <QUuid>
 #include <cstring>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <aclapi.h>
+#include <vector>
+#endif
 #ifdef Q_OS_ANDROID
 #include <QCoreApplication>
 #include <QJniObject>
@@ -22,6 +27,28 @@ iisacc::accounts::SessionStore *societyAppleStateKeyStore(QObject *parent);
 #endif
 
 namespace {
+#ifdef Q_OS_WIN
+bool protectWindowsState(const QString &path, bool directory) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> storage(size);
+    const bool read = GetTokenInformation(token, TokenUser, storage.data(), size, &size);
+    CloseHandle(token); if (!read) return false;
+    const auto user = reinterpret_cast<TOKEN_USER *>(storage.data());
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions = FILE_ALL_ACCESS; access.grfAccessMode = SET_ACCESS;
+    access.grfInheritance = directory ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID; access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(user->User.Sid);
+    PACL acl = nullptr;
+    if (SetEntriesInAclW(1, &access, nullptr, &acl) != ERROR_SUCCESS) return false;
+    const auto result = SetNamedSecurityInfoW(const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(path.utf16())),
+        SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, acl, nullptr);
+    LocalFree(acl); return result == ERROR_SUCCESS;
+}
+#endif
 constexpr auto tombstone = "SGS0";
 constexpr auto version = "SGS1";
 const QString masterKey = QStringLiteral("group-state-aes256-v1");
@@ -61,6 +88,9 @@ GroupSessionStore::GroupSessionStore(QString directory, SessionStore *keys, Sess
 bool GroupSessionStore::prepare() {
     if (m_directory.isEmpty() || !QDir::isAbsolutePath(m_directory) || !m_keys) return fail("The Society group location or key store is unavailable.");
     QString current = QDir::rootPath();
+#ifdef Q_OS_WIN
+    current = QFileInfo(m_directory).absoluteFilePath().left(3);
+#endif
     if (!m_managedRoot.isEmpty()) {
         // Mobile sandboxes cannot inspect arbitrary ancestors such as /var or
         // /data/user. Start at the root returned by the OS entitlement API.
@@ -79,6 +109,9 @@ bool GroupSessionStore::prepare() {
         info.refresh(); if (!info.isDir()) return fail("The Society state directory is unavailable.");
     }
     if (!QFile::setPermissions(m_directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner)) return fail("Society state permissions could not be applied.");
+#ifdef Q_OS_WIN
+    if (!protectWindowsState(m_directory, true)) return fail("Society state ACL could not be applied.");
+#endif
 #ifdef Q_OS_DARWIN
     if (!societyProtectStatePath(m_directory)) return fail("Society state data protection could not be applied.");
 #endif
@@ -101,7 +134,9 @@ bool GroupSessionStore::save(const QString &key, const QByteArray &bytes, const 
     QSaveFile file(info.absoluteFilePath());
     if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
         || file.write(bytes) != bytes.size() || !file.commit()) return fail("The Society state record could not be committed.");
-#ifdef Q_OS_DARWIN
+#ifdef Q_OS_WIN
+    return protectWindowsState(info.absoluteFilePath(), false) || fail("Society state record ACL could not be applied.");
+#elif defined(Q_OS_DARWIN)
     return societyProtectStatePath(info.absoluteFilePath()) || fail("Society state record protection could not be applied.");
 #else
     return true;

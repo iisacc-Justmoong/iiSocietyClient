@@ -95,6 +95,14 @@ private slots:
         QVERIFY(restored.logout()); QTRY_VERIFY(!restored.signedIn());
         QVERIFY(restored.savedHostConnection().isEmpty());
     }
+    void nativeDiscoveryLifecycleWithoutNetwork() {
+        QObject owner;
+        auto *discovery = DiscoveryService::createNetwork(&owner);
+        QVERIFY(discovery);
+        QCOMPARE(discovery->parent(), &owner);
+        discovery->stop();
+        discovery->stop();
+    }
     void accountProofRejectsTamperingExpiryAndCrossAccount() {
         AccountServer authority; QVERIFY(authority.server.listen(QHostAddress::LocalHost));
         MemorySessionStore state; AccountSession account(authority.url(), &state, nullptr);

@@ -1,0 +1,1 @@
+Windows GroupSessionStore는 현재 프로세스 사용자의 SID에만 FILE_ALL_ACCESS를 부여하고 상속 DACL을 차단한다. 디렉터리의 새 자식 파일은 동일한 범위를 상속한다. 저장 성공 뒤 암호화 레코드의 DACL을 다시 고정한다. Society.GroupState 회귀는 실제 저장 레코드의 SID, ACE 수 및 SE_DACL_PROTECTED와 복호화 재시작을 검증한다. 구현 근거: https://learn.microsoft.com/en-us/windows/win32/secauthz/creating-or-modifying-an-acl

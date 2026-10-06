@@ -27,7 +27,7 @@ class DnsSdService final : public DiscoveryService {
         explicit Operation(DnsSdService *service) : QObject(service), owner(service) {}
         ~Operation() override { if (ref) DNSServiceRefDeallocate(ref); }
     };
-    struct Service { QByteArray name, type, domain; uint32_t interface; QPointer<Operation> resolving; };
+    struct Service { QByteArray name, type, domain; uint32_t interfaceIndex; QPointer<Operation> resolving; };
     QHash<QString, Service> services;
     QList<Operation *> operations;
     QTimer refresh;
@@ -58,8 +58,8 @@ class DnsSdService final : public DiscoveryService {
     void resolve(const QString &key) {
         if (!services.contains(key) || services.value(key).resolving) return;
         auto &service = services[key]; auto *op = make(); op->key = key; service.resolving = op;
-        const auto result = DNSServiceResolve(&op->ref, 0, service.interface, service.name.constData(), service.type.constData(),
-            service.domain.constData(), [](DNSServiceRef, DNSServiceFlags, uint32_t interface, DNSServiceErrorType code,
+        const auto result = DNSServiceResolve(&op->ref, 0, service.interfaceIndex, service.name.constData(), service.type.constData(),
+            service.domain.constData(), [](DNSServiceRef, DNSServiceFlags, uint32_t interfaceIndex, DNSServiceErrorType code,
                                          const char *, const char *hostname, uint16_t port, uint16_t length,
                                          const unsigned char *txt, void *context) {
                 auto *operation = static_cast<Operation *>(context); auto *self = operation->owner;
@@ -78,7 +78,7 @@ class DnsSdService final : public DiscoveryService {
 #ifdef Q_OS_DARWIN
                         auto *addressOp = self->make(); addressOp->key = key; addressOp->record = record; addressOp->port = qFromBigEndian(port);
                         if (self->services.contains(key)) self->services[key].resolving = addressOp;
-                        const auto result = DNSServiceGetAddrInfo(&addressOp->ref, 0, interface, kDNSServiceProtocol_IPv4, hostname,
+                        const auto result = DNSServiceGetAddrInfo(&addressOp->ref, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hostname,
                             [](DNSServiceRef, DNSServiceFlags flags, uint32_t, DNSServiceErrorType error, const char *,
                                const struct sockaddr *address, uint32_t, void *context) {
                                 auto *op = static_cast<Operation *>(context); auto *owner = op->owner;
@@ -149,18 +149,18 @@ public:
         if (!watch(registration, code)) return;
         auto *browse = make();
         if (!watch(browse, DNSServiceBrowse(&browse->ref, 0, 0, serviceType, "local.",
-            [](DNSServiceRef, DNSServiceFlags flags, uint32_t interface, DNSServiceErrorType result,
+            [](DNSServiceRef, DNSServiceFlags flags, uint32_t interfaceIndex, DNSServiceErrorType result,
                const char *name, const char *type, const char *domain, void *context) {
                 auto *self = static_cast<Operation *>(context)->owner;
                 trace(QStringLiteral("browse result %1, added %2").arg(result).arg(bool(flags & kDNSServiceFlagsAdd)));
                 if (result != kDNSServiceErr_NoError) { self->error(result); return; }
-                const auto key = QString::number(interface) + ':' + QString::fromUtf8(name);
+                const auto key = QString::number(interfaceIndex) + ':' + QString::fromUtf8(name);
                 if (!(flags & kDNSServiceFlagsAdd)) {
                     if (auto op = self->services.value(key).resolving) self->retire(op);
                     self->services.remove(key); emit self->lost(key); return;
                 }
                 if (!self->services.contains(key) && self->services.size() < 128)
-                    self->services.insert(key, {name, type, domain, interface, nullptr});
+                    self->services.insert(key, {name, type, domain, interfaceIndex, nullptr});
                 self->resolve(key);
             }, browse))) return;
         refresh.start();
