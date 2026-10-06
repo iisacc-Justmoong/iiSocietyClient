@@ -27,24 +27,24 @@ can reactivate that process; signed but stale discovery alone cannot roll it bac
 Tests cover restart persistence, wrong-host rejection, logout, recovery without
 Bonjour announcements, and rejection of a saved route with a wrong account key.
 
-Society와 소비 앱이 공유하는 인증·검색·선택 다운로드 세션이다. Society UI 프로세스가 중단되어도 앱 내부에서 같은 App Group의 Society 컨테이너와 인증 세션을 사용한다. 호스트의 확인된 namespace와 기존 TLS/HMAC 페어링을 유지한다.
+This is the authentication, search, and select download session shared by Society and the consumer app. Society UI process interruption still allows the app to use the Society container and authentication session within the same App Group. It maintains the host's verified namespace and existing TLS / HMAC pairing.
 
-`Client::start(container)`는 기존 Society replica를 열고 메타데이터와 로컬 제출을 동기화한다. `StorageMap::request(keys)`는 특정 버전을 고정한 다운로드 요청을 디스크에 남긴다. `Client::synchronizeNow()`로 처리를 촉진하고 `StorageMap::requestState(id)`의 ready 이후에만 파일을 사용한다. 취소·실패 시 검증되지 않은 부분 파일은 공개 경로에 나타나지 않는다.
+`Client::start(container)` opens the existing Society replica and synchronizes metadata and local submissions. `StorageMap::request(keys)` leaves a fixed-version download request on the disk. Processing is facilitated by `Client::synchronizeNow()` and files are used only after `StorageMap::requestState(id)` is ready. Unverified partial files do not appear in the public path upon cancellation or failure.
 
-호스트에만 있는 모델의 생성은 `requestHost`로 `society.generation` 요청을 보내고 `hostResponse`를 받는다. 호출자는 주소·자격 증명·다른 호스트를 지정하지 못하며 현재 replica에 연결된 인증 호스트만 사용한다. 모델 다운로드와 별도 요청으로 처리하므로 로컬 모델을 받기 전에 호스트 큐를 사용할 수 있다. 연결 전이나 로그아웃 후에는 요청을 보내지 않는다. LAN TLS와 계정 relay 양쪽을 세션 테스트에서 검증한다.
+Model generation on the host sends a `society.generation` request via `requestHost` and receives `hostResponse`. The caller cannot specify address, credentials, or other hosts and uses only the authentication host connected to the current replica. Since model download and separate requests are handled separately, the host queue can be used before receiving the local model. Requests are not sent before connection or after logout. LAN validates both TLS and account relay in session tests.
 
-앱은 생성 결과를 Society 내부에서 atomic rename/commit으로 완성한 뒤 synchronizeNow를 호출한다. 네트워크가 끊기면 원본 파일과 제출 저널이 남고 다음 연결에서 재시도한다. 계정·페어링 상태는 기존 암호화된 GroupSessionStore에만 저장하며 파일 컨테이너에 복사하지 않는다.
+The app completes the generation result with an atomic rename/commit inside Society and then calls synchronizeNow. If the network is interrupted, the original file and submission journal remain, and it retries on the next connection. Account and pairing status are stored only in the existing encrypted GroupSessionStore and are not copied to the file container.
 
-AccountSession, NearbyDevices, AutomaticPairing, GroupSessionStore 구현을 Society 앱에서 이 SDK로 이전했다. Society의 QML AccountController는 얇은 등록 래퍼다. 앱 생명주기·백그라운드 실행 허가·상태 표시 정책은 소비 앱이 담당한다.
+Implementation of AccountSession, NearbyDevices, AutomaticPairing, and GroupSessionStore was migrated from the Society app to this SDK. Society's QML AccountController is a thin registration wrapper. The consumer app is responsible for app lifecycle, background execution permission, and status display policy.
 
 
-의존성은 iiSocietySync 0.8.0, iiSocietyContainer 0.14.0, iiServerHost 0.6.0, iiAcountManager 및 기존 Qt이다. 데스크톱 상태 암호화에는 OpenSSL Crypto, iOS에는 CryptoKit을 사용한다. SDK는 상위 Product 소스나 Helper에 의존하지 않는다. 헤더는 `iiSocietyClient/Client.h` 경로로 설치한다. 소비 앱은 저장소 객체를 만들 때 start, 명시 다운로드/파일 공개 후 synchronizeNow, 백그라운드 전환/종료 시 stop을 호출한다.
+Dependencies are iiSocietySync, 0.8.0, iiSocietyContainer, 0.14.0, iiServerHost, 0.6.0, iiAcountManager, and existing Qt. Desktop state encryption uses OpenSSL Crypto and iOS uses CryptoKit. The SDK does not depend on higher-level Product sources or Helpers. Headers are installed via the `iiSocietyClient/Client.h` path. The consumer app calls start when creating the repository object, explicitly downloads/file publishes after synchronizeNow, and calls stop on background transition/termination.
 
-`AccountSession::storageScope()`는 인증 서비스 origin과 계정 sub로 계산하며 LAN proof와 서버 복제가 같은 namespace를 사용한다. 다른 계정의 replica는 열지 않는다. 최초 Society 설정이 끝나지 않았으면 새 호스트를 임의 선택하지 않는다. `client-session.lock` 점유 실패는 기다렸다가 재시도하고 다른 프로세스의 연결을 강제로 끊지 않는다.
+`AccountSession::storageScope()` is calculated using the authentication service origin and account sub, and LAN proof and server replication use the same namespace. Replicas of other accounts are not opened. If the initial Society configuration is not complete, a new host is not arbitrarily selected. `client-session.lock` occupancy failure is retried after waiting, and connections from other processes are not forcibly terminated.
 
-`iiSocietyClient.Session`은 격리된 계정 서비스·저장소와 실제 TLS 또는 loopback relay를 사용한다. Society 앱 프로세스 없이 원본 미보유 목록에서 모델 요청·완료·로컬 결과 업로드·로그아웃 중단을 확인한다. 검색 레코드의 전달은 주입한 DiscoveryService이며 실제 Bluetooth 라디오 성능 검사는 아니다. 테스트는 실사용 계정 복원을 비활성화한다.
+`iiSocietyClient.Session` uses an isolated account service and repository, along with actual TLS or loopback relay. Without the Society app process, it checks model request, completion, local result upload, and logout cancellation from the missing original list. Delivery of search records is via injected DiscoveryService and is not an actual Bluetooth radio performance check. Testing disables real-use account restoration.
 
-SDK 루트의 설치기는 이 디렉터리의 CMake 프로젝트와 의존성을 자동 발견한다. `SDK/install.sh --dry-run --only iiSocietyClient`로 Container·ServerHost·Sync·Account의 설치 순서를 확인할 수 있다. 이번 검증은 macOS와 iOS arm64를 대상으로 하며 Android·Windows의 패키징/기기 실행을 대신하지 않는다.
+SDK's installer automatically discovers the CMake project and dependencies in this directory. The installation order of Container, ServerHost, Sync, and Account can be verified with `SDK/install.sh --dry-run --only iiSocietyClient`. This validation targets macOS and iOS arm64, and does not substitute for Android ·Windows packaging or device execution.
 
 ## Source layout
 
@@ -56,29 +56,19 @@ host device ID, image path and revision). Other devices retain their local repli
 A location refresh does not request pairing keys or emit account changes when the value is unchanged.
 The account API and SDK contract are documented in `iiAcountManager/docs/ACCOUNT_CONTRACT.md`.
 
-## 계정 GraphQL 호환성
+<a id="계정-graphql-호환성"></a>
 
-iiAcountManager 0.2.8 이상이 필요하다. 로그인과 컨테이너 위치 동기화는 해당 SDK의
-`POST /Account/GraphQL` `appSession` mutation을 사용한다. 페어링도 같은 endpoint에
-`variables.input = {intent: "pairing", device: ...}`를 보낸다. `data.appSession.pairing`을
-검증한 뒤에만 저장하며, HTTP 200 GraphQL 오류의 세션 만료도 AccountManager에 전달한다.
-쿠키 범위·계정/기기 결합·키 검증·보안 저장소 계약은 유지한다. 운영 GraphQL 서버 배포가
-새 클라이언트 배포보다 먼저 이루어져야 하며 REST 재시도는 없다.
+## Account GraphQL compatibility
 
-## macOS 개발 빌드의 로그인 저장소
+iiAcountManager 0.2.8 or higher is required. Login and container location synchronization use the `POST /Account/GraphQL` `appSession` mutation of the corresponding SDK. Pairing also sends `variables.input = {intent: "pairing", device: ...}` to the same endpoint. Storage occurs only after `data.appSession.pairing` is verified, and session expiration for HTTP 200 GraphQL errors is also passed to AccountManager. Cookie scope, account/device binding, key verification, and secure storage contract are maintained. Operational GraphQL server deployment must occur before new client deployment, and REST retry is not performed.
 
-실행 중인 프로세스의 Security framework 서명 정보를 확인한다. 개발자 팀이 없는
-비샌드박스 실행 파일(임시 서명 포함)은 사용자 Application Support 아래
-`iisacc/Development Groups/<SocietyAppGroup>/Library/Application Support/SocietyState`를
-사용한다. 앱 이름이 달라도 같은 그룹의 GUI와 daemon은 같은 위치를 사용한다.
-개발용 Keychain 서비스도 `.development.encrypted-state`로 분리한다. 기존 AES-256-GCM,
-0700/0600 권한, 철회 세대와 암호문 검증은 그대로 적용한다.
+<a id="macos-개발-빌드의-로그인-저장소"></a>
 
-팀 서명 또는 sandbox가 있는 앱은 계속 OS App Group API를 사용한다. 서명 조회 실패나
-보호 그룹 접근 거부를 개발 경로로 우회하지 않는다. iOS의 App Group 및 Data Protection도
-유지한다. 정식 서명과 개발 서명 간 로그인 정보를 자동 복사하지 않는다.
-`iiSocietyClient.AppleState`는 실제 임시 서명 프로세스에서 경로 선택과 앱/daemon 일치를
-검증한다. 암호화 저장·삭제·재실행 검사는 Society.GroupState에서 수행한다.
+## macOS development build login repository
+
+Checks the Security framework signature information of the running process. Non-sandbox executables without a developer team (including temporary signatures) use `iisacc/Development Groups/<SocietyAppGroup>/Library/Application Support/SocietyState` under User Application Support. GUIs and daemons in the same group use the same location even if the app name differs. The development Keychain service is also separated at `.development.encrypted-state`. Existing AES-256-GCM, 0700/0600 permissions, revocation generations, and ciphertext verification are applied as is.
+
+Apps with team signatures or sandbox continue to use OS App Group API. Failure to retrieve signatures or protection group access denial is not bypassed via the development path. iOS's App Group and Data Protection are also maintained. Login information is not automatically copied between formal and development signatures. `iiSocietyClient.AppleState` validates path selection and app/daemon matching in the actual temporary signature process. Encryption storage, deletion, and re-execution checks are performed at Society. GroupState.
 
 LAN clients require server-issued account pairing proofs. Both LAN and relay select the host and container in the authenticated account `societyContainerDrive`; missing registration or another host grants no synchronization. The registered replacement host adopts a fresh mirror while retaining previous files in recovery.
 
